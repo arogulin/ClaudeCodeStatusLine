@@ -3,6 +3,10 @@
 # Single line: Model | tokens | %used | %remain | think | 5h bar @reset | 7d bar @reset | extra
 
 set -f  # disable globbing
+
+# Segment separator sentinel. Segments are collected with this marker and
+# joined into one or more lines at the end, wrapping when the terminal is narrow.
+SEGSEP=$(printf '\037')
 VERSION="1.4.4"
 
 input=$(cat)
@@ -10,6 +14,15 @@ input=$(cat)
 if [ -z "$input" ]; then
     printf "Claude"
     exit 0
+fi
+
+# record which transcript is live in this agterm pane, for codex-recap
+if [ -n "$AGTERM_SESSION_ID" ]; then
+    transcript_path=$(echo "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
+    if [ -n "$transcript_path" ]; then
+        mkdir -p /tmp/claude/panes 2>/dev/null
+        printf '%s\n' "$transcript_path" > "/tmp/claude/panes/${AGTERM_SESSION_ID}.${AGTERM_PANE:-left}"
+    fi
 fi
 
 # ANSI colors matching oh-my-posh theme
@@ -141,7 +154,7 @@ cwd=$(echo "$input" | jq -r '.cwd // empty')
 if [ -n "$cwd" ]; then
     display_dir="${cwd##*/}"
     git_branch=$(git -C "${cwd}" rev-parse --abbrev-ref HEAD 2>/dev/null)
-    out+=" ${dim}|${reset} "
+    out+="${SEGSEP}"
     out+="${cyan}${display_dir}${reset}"
     if [ -n "$git_branch" ]; then
         out+="${dim}@${reset}${green}${git_branch}${reset}"
@@ -150,9 +163,75 @@ if [ -n "$cwd" ]; then
     fi
 fi
 
-out+=" ${dim}|${reset} "
+out+="${SEGSEP}"
 out+="${orange}${used_tokens}/${total_tokens}${reset} ${dim}(${reset}${green}${pct_used}%${reset}${dim})${reset}"
-out+=" ${dim}|${reset} "
+# ===== Prompt cache stats (own line; Claude Code v2.1.251+) =====
+# Absent until the main conversation's first API response.
+cache_line=""
+cache_stats=$(echo "$input" | jq -r '
+    if (.prompt_cache.caching_observed == true) then
+      .prompt_cache
+      | [ (.hit_ratio // -1), (.warm // false), (.ttl // ""), (.expires_at // 0),
+          (.requests // 0), (.misses // 0), (.expected_rebuilds // 0),
+          (.cache_write_tokens // 0), (.miss_recache_tokens // 0),
+          (.recache_tokens_if_cold // 0),
+          ((.last_miss_cause.causes // []) | join(",")) ]
+      | @tsv
+    else empty end' 2>/dev/null)
+
+if [ -n "$cache_stats" ]; then
+    IFS=$'\t' read -r pc_ratio pc_warm pc_ttl pc_expires pc_requests pc_misses \
+        pc_rebuilds pc_write pc_miss_write pc_cold_write pc_causes <<< "$cache_stats"
+
+    cache_line+="${white}cache${reset} "
+    if [ "$pc_ratio" = "-1" ]; then
+        cache_line+="${dim}-${reset}"
+    else
+        pc_pct=$(LC_NUMERIC=C awk "BEGIN {printf \"%.0f\", $pc_ratio * 100}")
+        cache_line+="$(usage_color $(( 100 - pc_pct )))${pc_pct}%${reset}"
+    fi
+
+    # warm/cold, with time left stated against the TTL it counts down from
+    if [ "$pc_warm" = "true" ]; then
+        cache_line+=" ${green}warm${reset}"
+        pc_left=0
+        [ "${pc_expires:-0}" -gt 0 ] 2>/dev/null && pc_left=$(( pc_expires - $(date +%s) ))
+        if [ "$pc_left" -gt 0 ]; then
+            if [ "$pc_left" -ge 3600 ]; then
+                pc_left_str="$(( pc_left / 3600 ))h$(( (pc_left % 3600) / 60 ))m"
+            else
+                pc_left_str="$(( pc_left / 60 ))m"
+            fi
+            cache_line+=" ${dim}${pc_left_str} left${reset}"
+            [ -n "$pc_ttl" ] && cache_line+="${dim} of ${pc_ttl}${reset}"
+        elif [ -n "$pc_ttl" ]; then
+            cache_line+=" ${dim}${pc_ttl} ttl${reset}"
+        fi
+    else
+        cache_line+=" ${dim}cold${reset}"
+        [ -n "$pc_ttl" ] && cache_line+=" ${dim}${pc_ttl} ttl${reset}"
+    fi
+
+    cache_line+="${SEGSEP}${white}req${reset} ${pc_requests}"
+    if [ "${pc_misses:-0}" -gt 0 ] 2>/dev/null; then
+        cache_line+=" ${dim}/${reset} ${red}miss ${pc_misses}${reset}"
+        [ -n "$pc_causes" ] && cache_line+=" ${dim}(${pc_causes})${reset}"
+    else
+        cache_line+=" ${dim}/${reset} ${green}miss 0${reset}"
+    fi
+    [ "${pc_rebuilds:-0}" -gt 0 ] 2>/dev/null && \
+        cache_line+=" ${dim}/ rebuild ${pc_rebuilds}${reset}"
+
+    cache_line+="${SEGSEP}${white}written${reset} ${orange}$(format_tokens ${pc_write:-0})${reset}"
+    if [ "${pc_miss_write:-0}" -gt 0 ] 2>/dev/null; then
+        cache_line+=" ${dim}(${reset}${red}$(format_tokens $pc_miss_write) wasted${reset}${dim})${reset}"
+    fi
+    if [ "${pc_cold_write:-0}" -gt 0 ] 2>/dev/null; then
+        cache_line+="${SEGSEP}${dim}if cold:${reset} ${yellow}$(format_tokens $pc_cold_write)${reset}"
+    fi
+fi
+
+out+="${SEGSEP}"
 out+="effort: "
 case "$effort_level" in
     low)    out+="${dim}${effort_level}${reset}" ;;
@@ -369,7 +448,7 @@ format_reset_time() {
     [ -n "$formatted" ] && echo "$formatted"
 }
 
-sep=" ${dim}|${reset} "
+sep="${SEGSEP}"
 
 # Render extra_usage segment from API usage data (not available via stdin rate_limits).
 # Appends to the global $out. No-op when data is missing or is_enabled is false.
@@ -511,10 +590,77 @@ fi
 
 # Append CLI version as last segment
 if [ -n "$cli_version" ]; then
-    out+=" ${dim}|${reset} ${orange}v${cli_version}${reset}"
+    out+="${SEGSEP}${orange}v${cli_version}${reset}"
 fi
 
-# Output
-printf "%b" "$out$update_line"
+# ===== Wrap segments across lines to fit the terminal width =====
+# Override detection with STATUSLINE_COLS, or force a single line with
+# STATUSLINE_MULTILINE=false.
+# The statusline runs without a controlling terminal, so /dev/tty is unusable.
+# Resolve the terminal device from the parent process instead.
+cols_from_pid() {
+    local dev
+    dev=$(ps -o tty= -p "$1" 2>/dev/null | tr -d '[:space:]')
+    case "$dev" in
+        ''|'??'|'-'|'?') return 1 ;;
+    esac
+    { stty size <"/dev/$dev"; } 2>/dev/null | cut -d' ' -f2
+}
+
+term_cols="${STATUSLINE_COLS:-}"
+[ -z "$term_cols" ] && term_cols=$(cols_from_pid "$PPID")
+[ -z "$term_cols" ] && term_cols=$(cols_from_pid "$$")
+[ -z "$term_cols" ] && term_cols=$( { stty size </dev/tty; } 2>/dev/null | cut -d' ' -f2)
+case "$term_cols" in
+    ''|*[!0-9]*) term_cols=80 ;;
+esac
+[ "$term_cols" -lt 20 ] && term_cols=80
+
+# Visible width of a segment, ignoring the literal \033[...m escape sequences.
+visible_width() {
+    local plain
+    plain=$(printf '%s' "$1" | sed -e 's/\\033\[[0-9;]*m//g' -e $'s/\033\[[0-9;]*m//g')
+    printf '%s' "${#plain}"
+}
+
+joiner=" ${dim}|${reset} "
+joiner_width=3
+avail=$(( term_cols - 2 ))
+
+# Join SEGSEP-separated segments, wrapping onto extra lines when they don't fit.
+wrap_segments() {
+    local blob=$1 wrapped="" line="" line_width=0 segment seg_width
+    if [ "${STATUSLINE_MULTILINE:-true}" = "false" ]; then
+        printf '%s' "${blob//"$SEGSEP"/$joiner}"
+        return
+    fi
+    while IFS= read -r -d "$SEGSEP" segment || [ -n "$segment" ]; do
+        segment=${segment%$'\n'}
+        [ -z "$segment" ] && continue
+        seg_width=$(visible_width "$segment")
+        if [ -z "$line" ]; then
+            line="$segment"
+            line_width=$seg_width
+        elif [ $(( line_width + joiner_width + seg_width )) -le "$avail" ]; then
+            line+="${joiner}${segment}"
+            line_width=$(( line_width + joiner_width + seg_width ))
+        else
+            wrapped+="${line}\n"
+            line="$segment"
+            line_width=$seg_width
+        fi
+    done <<< "$blob"
+    printf '%s' "${wrapped}${line}"
+}
+
+rendered=$(wrap_segments "$out")
+
+# The cache stats always start on their own line below the main status line,
+# and wrap the same way when they are too wide for the terminal.
+if [ -n "$cache_line" ]; then
+    rendered+="\n$(wrap_segments "$cache_line")"
+fi
+
+printf "%b" "$rendered$update_line"
 
 exit 0
