@@ -123,10 +123,10 @@ elif [ -f "$settings_path" ]; then
 fi
 [ -z "$effort_level" ] && effort_level="medium"
 
-# ===== Claude CLI version (cached, 1h TTL) =====
+# ===== Installed Claude CLI version (cached, 60s TTL) =====
 cli_version_cache="/tmp/claude/statusline-cli-version"
 cli_version=""
-cli_version_max_age=3600
+cli_version_max_age=60
 
 if [ -f "$cli_version_cache" ]; then
     cv_mtime=$(stat -c %Y "$cli_version_cache" 2>/dev/null || stat -f %m "$cli_version_cache" 2>/dev/null)
@@ -586,9 +586,15 @@ if [ "${STATUSLINE_CHECK_UPDATES:-true}" != "false" ]; then
     fi
 fi
 
-# Append CLI version as last segment
-if [ -n "$cli_version" ]; then
-    out+="${SEGSEP}${orange}v${cli_version}${reset}"
+# Append the running CLI version as last segment, plus the installed version
+# in parentheses when an upgrade landed after this session started.
+running_version=$(echo "$input" | jq -r '.version // empty' 2>/dev/null)
+shown_version="${running_version:-$cli_version}"
+if [ -n "$shown_version" ]; then
+    out+="${SEGSEP}${orange}v${shown_version}${reset}"
+    if [ -n "$cli_version" ] && [ "$cli_version" != "$shown_version" ]; then
+        out+=" ${dim}(${reset}${yellow}v${cli_version}${reset}${dim})${reset}"
+    fi
 fi
 
 # ===== Wrap segments across lines to fit the terminal width =====
