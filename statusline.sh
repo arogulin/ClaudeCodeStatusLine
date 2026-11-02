@@ -1,13 +1,13 @@
 #!/bin/bash
 # Source: https://github.com/daniel3303/ClaudeCodeStatusLine
-# Single line: Model | tokens | %used | %remain | think | 5h bar @reset | 7d bar @reset | extra
+# Single line: Model (effort) | dir@branch | tokens (%used) | 5h @reset | 7d @reset | extra | CLI version
 
 set -f  # disable globbing
 
 # Segment separator sentinel. Segments are collected with this marker and
 # joined into one or more lines at the end, wrapping when the terminal is narrow.
 SEGSEP=$(printf '\037')
-VERSION="1.4.4"
+VERSION="1.4.5"
 
 input=$(cat)
 
@@ -147,7 +147,16 @@ fi
 
 # ===== Build single-line output =====
 out=""
-out+="${blue}${model_name}${reset}"
+out+="${blue}${model_name}${reset} ${dim}(${reset}"
+case "$effort_level" in
+    low)    out+="${dim}${effort_level}${reset}" ;;
+    medium) out+="${orange}med${reset}" ;;
+    high)   out+="${green}${effort_level}${reset}" ;;
+    xhigh)  out+="${purple}${effort_level}${reset}" ;;
+    max)    out+="${red}${effort_level}${reset}" ;;
+    *)      out+="${green}${effort_level}${reset}" ;;
+esac
+out+="${dim})${reset}"
 
 # Current working directory
 cwd=$(echo "$input" | jq -r '.cwd // empty')
@@ -230,17 +239,6 @@ if [ -n "$cache_stats" ]; then
         cache_line+="${SEGSEP}${dim}if cold:${reset} ${yellow}$(format_tokens $pc_cold_write)${reset}"
     fi
 fi
-
-out+="${SEGSEP}"
-out+="effort: "
-case "$effort_level" in
-    low)    out+="${dim}${effort_level}${reset}" ;;
-    medium) out+="${orange}med${reset}" ;;
-    high)   out+="${green}${effort_level}${reset}" ;;
-    xhigh)  out+="${purple}${effort_level}${reset}" ;;
-    max)    out+="${red}${effort_level}${reset}" ;;
-    *)      out+="${green}${effort_level}${reset}" ;;
-esac
 
 # ===== Cross-platform OAuth token resolution (from statusline.sh) =====
 # Tries credential sources in order: env var → macOS Keychain → Linux creds file → GNOME Keyring
